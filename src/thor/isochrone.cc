@@ -169,7 +169,7 @@ std::shared_ptr<const GriddedData<PointLL> > Isochrone::Compute(
 
     // Return after the time interval has been met
     if (pred.cost().secs > max_seconds) {
-      LOG_INFO("Exceed time interval: n = " + std::to_string(n));
+      LOG_DEBUG("Exceed time interval: n = " + std::to_string(n));
       return isotile_;
     }
 
@@ -284,7 +284,7 @@ std::shared_ptr<const GriddedData<PointLL> > Isochrone::ComputeReverse(
 
     // Return after the time interval has been met
     if (pred.cost().secs > max_seconds) {
-      LOG_INFO("Exceed time interval: n = " + std::to_string(n));
+      LOG_DEBUG("Exceed time interval: n = " + std::to_string(n));
       return isotile_;
     }
 
@@ -426,6 +426,7 @@ std::shared_ptr<const GriddedData<PointLL> > Isochrone::ComputeMultiModal(
   bool date_set = false;
   uint32_t blockid, tripid;
   std::unordered_map<std::string, uint32_t> operators;
+  std::unordered_set<uint32_t> processed_tiles;
   const GraphTile* tile;
   while (true) {
     // Get next element from adjacency list. Check that it is valid. An
@@ -453,7 +454,7 @@ std::shared_ptr<const GriddedData<PointLL> > Isochrone::ComputeMultiModal(
 
     // Return after the time interval has been met
     if (pred.cost().secs > max_seconds) {
-      LOG_INFO("Exceed time interval: n = " + std::to_string(n));
+      LOG_DEBUG("Exceed time interval: n = " + std::to_string(n));
       return isotile_;
     }
 
@@ -479,6 +480,15 @@ std::shared_ptr<const GriddedData<PointLL> > Isochrone::ComputeMultiModal(
       if (mode_ == TravelMode::kPedestrian && prior_stop.Is_Valid() && has_transit) {
         transfer_cost = tc->TransferCost();
       }
+
+      if (processed_tiles.find(tile->id().tileid()) == processed_tiles.end()) {
+        tc->AddToExcludeList(tile);
+        processed_tiles.emplace(tile->id().tileid());
+      }
+
+      //check if excluded.
+      if (tc->IsExcluded(tile, nodeinfo))
+        continue;
 
       // Add transfer time to the local time when entering a stop
       // as a pedestrian. This is a small added cost on top of
@@ -552,6 +562,10 @@ std::shared_ptr<const GriddedData<PointLL> > Isochrone::ComputeMultiModal(
         if (!tc->Allowed(directededge, pred, tile, edgeid)) {
           continue;
         }
+
+        //check if excluded.
+        if (tc->IsExcluded(tile, directededge))
+          continue;
 
         // Look up the next departure along this edge
         const TransitDeparture* departure = tile->GetNextDeparture(

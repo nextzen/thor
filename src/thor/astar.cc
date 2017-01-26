@@ -18,7 +18,7 @@ constexpr uint64_t kInitialEdgeLabelCount = 500000;
 
 // Default constructor
 AStarPathAlgorithm::AStarPathAlgorithm()
-    : mode_(TravelMode::kDrive),
+    : PathAlgorithm(), mode_(TravelMode::kDrive),
       travel_type_(0),
       adjacencylist_(nullptr),
       edgestatus_(nullptr),
@@ -134,7 +134,14 @@ std::vector<PathInfo> AStarPathAlgorithm::GetBestPath(PathLocation& origin,
   uint32_t nc = 0;       // Count of iterations with no convergence
                          // towards destination
   const GraphTile* tile;
+  size_t total_labels = 0;
   while (true) {
+    // Allow this process to be aborted
+    size_t current_labels = edgelabels_.size();
+    if(interrupt && total_labels/kInterruptIterationsInterval < current_labels/kInterruptIterationsInterval)
+      (*interrupt)();
+    total_labels = current_labels;
+
     // Get next element from adjacency list. Check that it is valid. An
     // invalid label indicates there are no edges that can be expanded.
     uint32_t predindex = adjacencylist_->pop();
@@ -362,10 +369,11 @@ void AStarPathAlgorithm::SetOrigin(GraphReader& graphreader,
     auto p = destinations_.find(edgeid);
     if (p != destinations_.end()) {
       if (IsTrivial(edgeid, origin, destination)) {
-        // Update cost and use A* heuristic from the origin location rather
-        // than the end node of this edge
+        // a trivial route passes along a single edge, meaning that the
+        // destination point must be on this edge, and so the distance
+        // remaining must be zero.
         cost -= p->second;
-        dist = astarheuristic_.GetDistance(origin.latlng_);
+        dist = 0.0;
       }
     }
 
@@ -441,8 +449,8 @@ bool AStarPathAlgorithm::IsTrivial(const GraphId& edgeid,
 // Form the path from the adjacency list.
 std::vector<PathInfo> AStarPathAlgorithm::FormPath(const uint32_t dest) {
   // Metrics to track
-  LOG_INFO("path_cost::" + std::to_string(edgelabels_[dest].cost().cost));
-  LOG_INFO("path_iterations::" + std::to_string(edgelabels_.size()));
+  LOG_DEBUG("path_cost::" + std::to_string(edgelabels_[dest].cost().cost));
+  LOG_DEBUG("path_iterations::" + std::to_string(edgelabels_.size()));
 
   // Work backwards from the destination
   std::vector<PathInfo> path;

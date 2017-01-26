@@ -121,31 +121,35 @@ uint32_t GetAdminIndex(
 void AssignAdmins(const TripPathController& controller,
                   TripPath& trip_path,
                   const std::vector<AdminInfo>& admin_info_list) {
-  // Assign the admins
-  for (const auto& admin_info : admin_info_list) {
-    TripPath_Admin* trip_admin = trip_path.add_admin();
+  if (controller.category_attribute_enabled(kAdminCategory)) {
+    // Assign the admins
+    for (const auto& admin_info : admin_info_list) {
+      TripPath_Admin* trip_admin = trip_path.add_admin();
 
-    // Set country code if requested
-    if (controller.attributes.at(kAdminCountryCode))
+      // Set country code if requested
+      if (controller.attributes.at(kAdminCountryCode))
         trip_admin->set_country_code(admin_info.country_iso());
 
-    // Set country text if requested
-    if (controller.attributes.at(kAdminCountryText))
-      trip_admin->set_country_text(admin_info.country_text());
+      // Set country text if requested
+      if (controller.attributes.at(kAdminCountryText))
+        trip_admin->set_country_text(admin_info.country_text());
 
-    // Set state code if requested
-    if (controller.attributes.at(kAdminStateCode))
-      trip_admin->set_state_code(admin_info.state_iso());
+      // Set state code if requested
+      if (controller.attributes.at(kAdminStateCode))
+        trip_admin->set_state_code(admin_info.state_iso());
 
-    // Set state text if requested
-    if (controller.attributes.at(kAdminStateText))
-      trip_admin->set_state_text(admin_info.state_text());
+      // Set state text if requested
+      if (controller.attributes.at(kAdminStateText))
+        trip_admin->set_state_text(admin_info.state_text());
 
-    valhalla::midgard::logging::Log("admin_state_iso::" + admin_info.state_iso(), " [ANALYTICS] ");
-    valhalla::midgard::logging::Log("admin_country_iso::" + admin_info.country_iso(), " [ANALYTICS] ");
+      valhalla::midgard::logging::Log("admin_state_iso::" + admin_info.state_iso(), " [ANALYTICS] ");
+      valhalla::midgard::logging::Log("admin_country_iso::" + admin_info.country_iso(), " [ANALYTICS] ");
+    }
   }
- }
 }
+
+}
+
 
 namespace valhalla {
 namespace thor {
@@ -227,6 +231,27 @@ TripPath_Use GetTripPathUse(Use use) {
       return TripPath_Use_kBusConnectionUse;
     case Use::kTransitConnection:
       return TripPath_Use_kTransitConnectionUse;
+  }
+}
+
+TripPath_Surface GetTripPathSurface(Surface surface) {
+  switch (surface) {
+    case Surface::kPavedSmooth:
+      return TripPath_Surface_kPavedSmooth;
+    case Surface::kPaved:
+      return TripPath_Surface_kPaved;
+    case Surface::kPavedRough:
+      return TripPath_Surface_kPavedRough;
+    case Surface::kCompacted:
+      return TripPath_Surface_kCompacted;
+    case Surface::kDirt:
+      return TripPath_Surface_kDirt;
+    case Surface::kGravel:
+      return TripPath_Surface_kGravel;
+    case Surface::kPath:
+      return TripPath_Surface_kPath;
+    case Surface::kImpassable:
+      return TripPath_Surface_kImpassable;
   }
 }
 
@@ -364,7 +389,13 @@ TripPath TripPathBuilder::Build(
     const TripPathController& controller, GraphReader& graphreader,
     const std::shared_ptr<sif::DynamicCost>* mode_costing,
     const std::vector<PathInfo>& path, PathLocation& origin, PathLocation& dest,
-    const std::vector<PathLocation>& through_loc) {
+    const std::vector<PathLocation>& through_loc,
+    const std::function<void ()>* interrupt_callback) {
+  // Test interrupt prior to building trip path
+  if (interrupt_callback) {
+    (*interrupt_callback)();
+  }
+
   // TripPath is a protocol buffer that contains information about the trip
   TripPath trip_path;
 
@@ -673,7 +704,10 @@ TripPath TripPathBuilder::Build(
     }
 
     if (controller.attributes.at(kNodeTimeZone)) {
-      trip_node->set_time_zone(DateTime::get_tz_db().from_index(node->timezone()).get()->to_posix_string());
+      const auto& tz_db = DateTime::get_tz_db();
+      auto tz = DateTime::get_tz_db().from_index(node->timezone());
+      if(tz)
+        trip_node->set_time_zone(tz->to_posix_string());
     }
 
     ///////////////////////////////////////////////////////////////////////////
@@ -1239,7 +1273,7 @@ TripPath_Edge* TripPathBuilder::AddTripEdge(const TripPathController& controller
 
   // Set surface if requested
   if (controller.attributes.at(kEdgeSurface))
-    trip_edge->set_surface(static_cast<uint32_t>(directededge->surface()));
+    trip_edge->set_surface(GetTripPathSurface(directededge->surface()));
 
   // Set the mode and travel type
   if (mode == sif::TravelMode::kBicycle) {
@@ -1462,13 +1496,13 @@ void TripPathBuilder::AddTripIntersectingEdge(const TripPathController& controll
   }
 
   // Set the previous/intersecting edge name consistency if requested
-  if (controller.attributes.at(kNodeIntersectingEdgePrevNameConsistency)) {
+  if (controller.attributes.at(kNodeIntersectingEdgeFromEdgeNameConsistency)) {
     itersecting_edge->set_prev_name_consistency(
         nodeinfo->name_consistency(prev_edge_index, local_edge_index));
   }
 
   // Set the current/intersecting edge name consistency if requested
-  if (controller.attributes.at(kNodeIntersectingEdgeCurrNameConsistency)) {
+  if (controller.attributes.at(kNodeIntersectingEdgeToEdgeNameConsistency)) {
     itersecting_edge->set_curr_name_consistency(
         nodeinfo->name_consistency(curr_edge_index, local_edge_index));
   }

@@ -25,7 +25,7 @@ namespace thor {
 constexpr uint64_t kInitialEdgeLabelCountBD = 1000000;
 
 // Default constructor
-BidirectionalAStar::BidirectionalAStar() {
+BidirectionalAStar::BidirectionalAStar(): PathAlgorithm() {
   threshold_ = 0;
   mode_ = TravelMode::kDrive;
   access_mode_ = kAutoAccess;
@@ -335,6 +335,7 @@ std::vector<PathInfo> BidirectionalAStar::GetBestPath(PathLocation& origin,
   // prevents one tree from expanding much more quickly (if in a sparser
   // portion of the graph) rather than strictly alternating.
   // TODO - CostMatrix alternates, maybe should try alternating here?
+  int n = 1;
   uint32_t forward_pred_idx, reverse_pred_idx;
   EdgeLabel pred, pred2;
   const GraphTile* tile;
@@ -342,6 +343,12 @@ std::vector<PathInfo> BidirectionalAStar::GetBestPath(PathLocation& origin,
   bool expand_forward  = true;
   bool expand_reverse  = true;
   while (true) {
+    // Allow this process to be aborted
+    if (interrupt && (n % kInterruptIterationsInterval) == 0) {
+      (*interrupt)();
+    }
+    n++;
+
     // Get the next predecessor (based on which direction was
     // expanded in prior step)
     if (expand_forward) {
@@ -685,8 +692,8 @@ std::vector<PathInfo> BidirectionalAStar::FormPath(GraphReader& graphreader) {
   // Metrics (TODO - more accurate cost)
   uint32_t pathcost = edgelabels_forward_[idx1].cost().cost +
                       edgelabels_reverse_[idx2].cost().cost;
-  LOG_INFO("path_cost::" + std::to_string(pathcost));
-  LOG_INFO("FormPath path_iterations::" + std::to_string(edgelabels_forward_.size()) +
+  LOG_DEBUG("path_cost::" + std::to_string(pathcost));
+  LOG_DEBUG("FormPath path_iterations::" + std::to_string(edgelabels_forward_.size()) +
            "," + std::to_string(edgelabels_reverse_.size()));
 
   // Work backwards on the forward path

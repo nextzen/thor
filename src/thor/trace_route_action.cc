@@ -44,30 +44,64 @@ worker_t::result_t thor_worker_t::trace_route(const boost::property_tree::ptree 
    * Valhalla will allow an efficient “edge-walking” algorithm rather than a more extensive
    * map-matching method. If true, this enforces to only use exact route match algorithm.
    */
-  bool exact_match = request.get<bool>("exact_match_only", false);
-
+  odin::TripPath trip_path;
   TripPathController controller;
-  // TODO parse include/exclude and set controller as needed - for now just default
 
   worker_t::result_t result { true };
   // Forward the original request
   result.messages.emplace_back(request_str);
 
-  // If the exact points from a prior route that was run agains the Valhalla road network,
-  //then we can traverse the exact shape to form a path by using edge-walking algorithm
-  odin::TripPath trip_path = route_match(controller);
-  if (trip_path.node().size() == 0) {
-    if (!exact_match) {
-      //If no Valhalla route match, then use meili map matching to match to local route network.
+  auto shape_match = STRING_TO_MATCH.find(request.get<std::string>("shape_match", "walk_or_snap"));
+  if (shape_match == STRING_TO_MATCH.cend())
+    throw valhalla_exception_t{400, 445};
+  else {
+    // If the exact points from a prior route that was run against the Valhalla road network,
+    // then we can traverse the exact shape to form a path by using edge-walking algorithm
+    switch (shape_match->second) {
+      case EDGE_WALK:
+        try {
+          //TODO: remove after dev complete
+          LOG_INFO("in " + shape_match->first);
+          trip_path = route_match(controller);
+          if (trip_path.node().size() == 0)
+            throw valhalla_exception_t{400, 443};
+        } catch (const valhalla_exception_t& e) {
+          LOG_INFO(shape_match->first + " algorithm failed to find exact route match.  Try using shape_match:'walk_or_snap' to fallback to map-matching algorithm");
+          throw valhalla_exception_t{400, 443};
+        }
+        break;
+      // If non-exact shape points are used, then we need to correct this shape by sending them
+      // through the map-matching algorithm to snap the points to the correct shape
+      case MAP_SNAP:
+        try {
+          //TODO: remove after dev complete
+          LOG_INFO("in " + shape_match->first);
+          trip_path = map_match(controller);
+        } catch (const valhalla_exception_t& e) {
+          LOG_INFO(shape_match->first + " algorithm failed to snap the shape points to the correct shape.");
+          throw valhalla_exception_t{400, 444};
+        }
+        break;
+      //If we think that we have the exact shape but there ends up being no Valhalla route match, then
+      // then we want to fallback to try and use meili map matching to match to local route network.
       //No shortcuts are used and detailed information at every intersection becomes available.
-      LOG_INFO("Could not find exact route match; Sending trace to map_match...");
-      try {
-        trip_path = map_match(controller);
-      } catch (...) {
-        valhalla_exception_t{400,444};
+      case WALK_OR_SNAP:
+        //TODO: remove after dev complete
+        LOG_INFO("in " + shape_match->first);
+        trip_path = route_match(controller);
+        if (trip_path.node().size() == 0) {
+          LOG_INFO(shape_match->first + " algorithm failed to find exact route match; Falling back to map_match...");
+          try {
+            trip_path = map_match(controller);
+          } catch (const valhalla_exception_t& e) {
+            LOG_INFO(shape_match->first + " algorithm failed to snap the shape points to the correct shape.");
+            throw valhalla_exception_t{400, 444};
+          }
+        }
+        break;
       }
-    } else throw valhalla_exception_t{400, 443};
-  }
+    }
+
   result.messages.emplace_back(trip_path.SerializeAsString());
 
   // Get processing time for thor
@@ -104,9 +138,10 @@ odin::TripPath thor_worker_t::route_match(const TripPathController& controller) 
     // Form the trip path based on mode costing, origin, destination, and path edges
     trip_path = thor::TripPathBuilder::Build(controller, reader, mode_costing,
                                              path_infos, correlated.front(),
-                                             correlated.back(), through_loc);
-
+                                             correlated.back(), through_loc,
+                                             interrupt_callback);
   }
+
   return trip_path;
 }
 
@@ -126,10 +161,11 @@ odin::TripPath thor_worker_t::map_match(const TripPathController& controller) {
     throw std::runtime_error(std::string(ex.what()));
   }
 
+  matcher->set_interrupt(interrupt_callback);
   std::vector<meili::Measurement> sequence;
   for (const auto& coord : shape) {
-    sequence.emplace_back(coord, 
-                          matcher->config().get<float>("gps_accuracy"), 
+    sequence.emplace_back(coord,
+                          matcher->config().get<float>("gps_accuracy"),
                           matcher->config().get<float>("search_radius"));
   }
 
@@ -147,10 +183,16 @@ odin::TripPath thor_worker_t::map_match(const TripPathController& controller) {
   // Set origin and destination from map matching results
   auto first_result_with_state = std::find_if(
       results.begin(), results.end(),
-      [](const meili::MatchResult& result) {return result.HasState();});
+      [](const meili::MatchResult& result) {
+        return result.HasState() && result.edgeid().Is_Valid();
+      });
+
   auto last_result_with_state = std::find_if(
       results.rbegin(), results.rend(),
-      [](const meili::MatchResult& result) {return result.HasState();});
+      [](const meili::MatchResult& result) {
+        return result.HasState() && result.edgeid().Is_Valid();
+      });
+
   if ((first_result_with_state != results.end())
       && (last_result_with_state != results.rend())) {
     baldr::PathLocation origin = matcher->mapmatching().state(
@@ -158,13 +200,62 @@ odin::TripPath thor_worker_t::map_match(const TripPathController& controller) {
     baldr::PathLocation destination = matcher->mapmatching().state(
         last_result_with_state->stateid()).candidate();
 
+    bool found_origin = false;
+    for (const auto& e : origin.edges) {
+      if (e.id == path_edges.front().edgeid) {
+        found_origin = true;
+        break;
+      }
+    }
+
+    if (!found_origin) {
+      LOG_INFO("Could not find origin edge");
+      // 1. origin must be at a node, so we can reuse any one of
+      // origin's edges
+
+      // 2. path_edges.front().edgeid must be the downstream edge that
+      // connects one of origin.edges (twins) at its start node
+      origin.edges.emplace_back(path_edges.front().edgeid,
+                                0.f,
+                                origin.edges.front().projected,
+                                origin.edges.front().score,
+                                origin.edges.front().sos);
+    }
+
+    bool found_destination = false;
+    for (const auto& e : destination.edges) {
+      if (e.id == path_edges.back().edgeid) {
+        found_destination = true;
+        break;
+      }
+    }
+
+    if (!found_destination) {
+      LOG_INFO("Could not find destination edge");
+      // 1. destination must be at a node, so we can reuse any one of
+      // destination's edges
+
+      // 2. path_edges.back().edgeid must be the upstream edge that
+      // connects one of destination.edges (twins) at its end node
+      destination.edges.emplace_back(path_edges.back().edgeid,
+                                     1.f,
+                                     destination.edges.front().projected,
+                                     destination.edges.front().score,
+                                     destination.edges.front().sos);
+    }
+
+
+    // assert origin.edges contains path_edges.front() &&
+    // destination.edges contains path_edges.back()
+
     // Empty through location list
     std::vector<baldr::PathLocation> through_loc;
 
     // Form the trip path based on mode costing, origin, destination, and path edges
     trip_path = thor::TripPathBuilder::Build(controller, matcher->graphreader(),
                                              mode_costing, path_edges, origin,
-                                             destination, through_loc);
+                                             destination, through_loc,
+                                             interrupt_callback);
   } else {
     throw baldr::valhalla_exception_t { 400, 442 };
   }
